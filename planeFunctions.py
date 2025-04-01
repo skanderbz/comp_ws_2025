@@ -6,11 +6,20 @@ from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy, DurabilityPo
 from px4_msgs.msg import OffboardControlMode, TrajectorySetpoint, VehicleCommand, VehicleStatus, VehicleLocalPosition, SensorGps
 import math
 import time
+from enum import Enum, auto
 # import pyproj
 
-class FixedWingTakeoffControl(Node):
+class FlightState(Enum):
+    INIT = auto()
+    ARMING = auto()
+    TAKEOFF = auto()
+    OFFBOARD_IDLE = auto()
+    LANDING = auto()
+
+class FixedWingControl(Node):
     def __init__(self):
         super().__init__('fixed_wing_takeoff_node')
+
 
         # Configure QoS profile for reliable communication
         qos_profile = QoSProfile(
@@ -37,7 +46,7 @@ class FixedWingTakeoffControl(Node):
             SensorGps, '/fmu/out/vehicle_gps_position', self.gps_callback, qos_profile)
 
         # Timer for publishing control commands
-        self.create_timer(0.1, self.timer_callback)  # 10Hz
+        #self.create_timer(0.1, self.timer_callback)  # 10Hz
 
         # Flight parameters
         self.cruise_altitude = 50.0  # meters - final cruise altitude
@@ -49,11 +58,10 @@ class FixedWingTakeoffControl(Node):
         self.local_position = None
         self.armed = False
         self.current_nav_state = None
-        self.flight_phase = 'INIT'  # States: INIT, ARMING, TAKEOFF, OFFBOARD_IDLE
+        self.FlightState = FlightState.INIT  # States: INIT, ARMING, TAKEOFF, OFFBOARD_IDLE
         self.start_position = None
         self.current_position = None
         self.takeoff_time = None
-        self.transition_to_offboard = False
         self.offboard_setpoint_sent = False
         self.circle_angle = 0.0  # For generating circular flight pattern
         self.rotations = 0
@@ -96,95 +104,12 @@ class FixedWingTakeoffControl(Node):
             self.origin_alt = msg.altitude_msl_m
             self.get_logger().info(f"Set GPS Origin: {self.origin_lat}, {self.origin_lon}, {self.origin_alt}")
 
-
-    def timer_callback(self):
-        """Execute the flight sequence based on current phase"""
-        # Ensure we have position data before proceeding
-        if not self.local_position:
-            return
-
-        # State machine for flight phases
-        if self.flight_phase == 'INIT' and self.local_position.xy_valid:
-            self.flight_phase = 'ARMING'
-            self.get_logger().info('Initializing: Proceeding to arming phase')
-        
-        elif self.flight_phase == 'ARMING':
-            if not self.armed:
-                self.arm_vehicle()
-            else:
-                self.flight_phase = 'TAKEOFF'
-                self.takeoff_time = self.get_clock().now()
-                self.get_logger().info('Armed: Proceeding to takeoff phase')
-                self.initiate_takeoff()
-        
-        elif self.flight_phase == 'TAKEOFF':
-            # Check if we've reached minimum altitude for transition
-            current_altitude = -self.local_position.z  # Convert from NED to altitude
-            
-            # We'll transition to offboard after takeoff mode has had time to get the aircraft in the air
-            # and we've reached a reasonable altitude
-            if (current_altitude > 30.0 and 
-                (self.current_nav_state == VehicleStatus.NAVIGATION_STATE_AUTO_TAKEOFF)):
-                self.get_logger().info(f"Current altitude: {current_altitude:.2f}m - Ready for offboard transition")
-                self.transition_to_offboard = True
-                
-            # Prepare for offboard mode by sending setpoints before switching
-            if self.transition_to_offboard:
-                self.publish_offboard_control_mode()
-                self.publish_circle_setpoint()
-                
-                # After sending setpoints for a second, switch to offboard
-                current_time = self.get_clock().now()
-                if not self.offboard_setpoint_sent:
-                    self.offboard_setpoint_sent = True
-                    self.setpoint_start_time = current_time
-                    self.get_logger().info("Starting to send offboard setpoints")
-                
-                # Check if we've been sending setpoints for at least 1 second
-                if (self.offboard_setpoint_sent and 
-                    (current_time - self.setpoint_start_time).nanoseconds / 1e9 >= 1.0):
-                    self.flight_phase = 'OFFBOARD_IDLE'
-                    self.get_logger().info('Transitioning to OFFBOARD mode with circle pattern')
-                    self.set_offboard_mode()
-        
-        elif self.flight_phase == 'OFFBOARD_IDLE':
-            # In offboard mode, continuously publish control mode and position setpoints
-            if self.current_nav_state != VehicleStatus.NAVIGATION_STATE_OFFBOARD:
-                self.get_logger().info(f"Not in OFFBOARD mode (current: {self.current_nav_state}), re-sending command")
-                self.set_offboard_mode()
-            
-            self.publish_offboard_control_mode()
-
-            if self.rotations < 2:
-                self.publish_circle_setpoint()
-                
-                # Update circle angle for next iteration
-                self.circle_angle += 0.01
-                if self.circle_angle > 2 * math.pi:
-                    self.circle_angle -= 2 * math.pi
-                    self.rotations += 1
-                    self.get_logger().info(f'Rotations: {self.rotations}')
-            else:
-                at_lat = round(self.targets[self.current_tgt][0], 2) - 2 <= round(self.current_position[0], 2) \
-                    and round(self.current_position[0], 2) <= round(self.targets[self.current_tgt][0], 2) + 2
-                at_lon = round(self.targets[self.current_tgt][1], 2) - 2 <= round(self.current_position[1], 2) \
-                    and round(self.current_position[1], 2) <= round(self.targets[self.current_tgt][1], 2) + 2
-                at_alt = round(self.targets[self.current_tgt][2], 2) - 4 <= round(self.current_position[2], 2) \
-                    and round(self.current_position[2], 2) <= round(self.targets[self.current_tgt][2], 2) + 4
-                
-                if not at_lat and not at_lon and not at_alt:
-                    self.get_logger().info(f'Current pos {self.current_position[0]:.2f}, {self.current_position[1]:.2f}, {self.current_position[2]:.2f}')
-                    self.get_logger().info(f'Flying to {self.targets[self.current_tgt]}')
-                    self.publish_waypoint_setpoint(*self.targets[self.current_tgt])
-                elif self.current_tgt < len(self.targets) - 1:   # Made it, go next
-                    self.current_tgt += 1
-                else:
-                    self.get_logger().info('REACHED ALL TARGETS!!!')
-
     def arm_vehicle(self):
         """Send command to arm the vehicle"""
         self.get_logger().info("Sending arm command")
         self.publish_vehicle_command(VehicleCommand.VEHICLE_CMD_COMPONENT_ARM_DISARM, param1=1.0)
+        self.FlightState = FlightState.ARMING
+
 
     def initiate_takeoff(self):
         """Command the vehicle to enter takeoff mode"""
@@ -197,12 +122,35 @@ class FixedWingTakeoffControl(Node):
             param6=self.local_position.ref_lon,  # Longitude
             param7=self.cruise_altitude  # Altitude
         )
+        self.FlightState = FlightState.TAKEOFF
+    
+    def full_takeoff(self, takeoff_altitude = None):
+            if takeoff_altitude == None:
+                takeoff_altitude = self.cruise_altitude
+
+            takeoff_altitude = float(takeoff_altitude)
+            transition_to_offboard = False
+
+            if not self.FlightState == FlightState.TAKEOFF:
+                self.initiate_takeoff()
+            current_altitude = -self.local_position.z  # Convert from NED to altitude
+            print(current_altitude > takeoff_altitude)
+            # We'll transition to offboard after takeoff mode has had time to get the aircraft in the air
+            # and we've reached a reasonable altitude
+            if (current_altitude > takeoff_altitude): #and (self.current_nav_state == VehicleStatus.NAVIGATION_STATE_AUTO_TAKEOFF)):
+                print("hit altitude")
+                self.get_logger().info(f"Current altitude: {current_altitude:.2f}m - Ready for offboard transition")
+                transition_to_offboard = True
+            if transition_to_offboard:
+                self.publish_offboard_control_mode()
+                print("setting waypoint")
+                self.publish_waypoint_setpoint(50.0,50.0,takeoff_altitude)
+                self.set_offboard_mode()
 
     def set_offboard_mode(self):
-        """Command the vehicle to enter offboard mode"""
         self.get_logger().info("Setting OFFBOARD mode")
         self.publish_vehicle_command(VehicleCommand.VEHICLE_CMD_DO_SET_MODE, param1=1.0, param2=6.0)
-
+        self.FlightState = FlightState.OFFBOARD_IDLE
 
     def publish_offboard_control_mode(self):
         """Publish offboard control mode"""

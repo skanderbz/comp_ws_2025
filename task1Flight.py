@@ -9,18 +9,37 @@ import math
 import time
 
 #QADT functions 
-import planeFunctions as pf
+import planeFunctions2 as pf
+from planeFunctions2 import FlightState
 
 
 
 def main(args=None) -> None:
     print('Starting offboard control node...')
     rclpy.init(args=args)
-    plane = pf.FixedWingTakeoffControl()
+    plane = pf.FixedWingControl()
+    plane.cruise_altitude = 50
+    plane.create_timer(0.1,lambda: task1(plane))
     rclpy.spin(plane)
     plane.destroy_node
     rclpy.shutdown()
+    
 
+#FLIGHT STATES = [INIT, ARMING, TAKEOFF, OFFBOARD_IDLE, LANDING]
+
+def task1(self):
+    if not self.local_position:
+            return
+    if not self.armed:
+        self.arm_vehicle()
+    if self.FlightState == FlightState.ARMING or self.FlightState == FlightState.TAKEOFF:
+        self.full_takeoff()
+    if self.FlightState == FlightState.OFFBOARD_IDLE:
+        self.publish_offboard_control_mode()
+        print("Switched to offboard")
+        self.publish_waypoint_setpoint(-1550.0,500.0,100.0)
+    print(self.local_position.z)
+    print(self.FlightState)
 
 if __name__ == '__main__':
     try:
