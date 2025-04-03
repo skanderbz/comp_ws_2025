@@ -68,7 +68,8 @@ class FixedWingControl(Node):
         self.origin_lat = None
         self.origin_lon = None
         self.origin_alt = None
-
+        self.circle_complete = False
+        self.waypoint_reached = False
         self.current_tgt = 0
         self.targets = [
             [-123.45, 234.56, 50.0],
@@ -144,7 +145,7 @@ class FixedWingControl(Node):
             if transition_to_offboard:
                 self.publish_offboard_control_mode()
                 print("setting waypoint")
-                self.publish_waypoint_setpoint(50.0,50.0,takeoff_altitude)
+                #self.publish_waypoint_setpoint(50.0,50.0,takeoff_altitude)
                 self.set_offboard_mode()
 
     def set_offboard_mode(self):
@@ -192,6 +193,48 @@ class FixedWingControl(Node):
         
         msg.timestamp = int(self.get_clock().now().nanoseconds / 1000)
         self.trajectory_setpoint_publisher.publish(msg)
+
+    def publish_circle_setpoint(self, center_x, center_y, altitude, radius):
+        """
+        Publish a setpoint for moving in a circle around (center_x, center_y)
+        at a given altitude and radius. If the full circle is completed,
+        sets self.circle_complete to True.
+        
+        Parameters:
+            center_x (float): X coordinate of the circle's center.
+            center_y (float): Y coordinate of the circle's center.
+            altitude (float): Altitude at which to fly (will be negated for NED).
+            radius (float): Radius of the circle. Negative radius reverses direction.
+        """
+        # Check if the full circle is complete
+        if self.circle_angle >= 2 * math.pi:
+            self.circle_complete = True
+            self.get_logger().info("Completed a full circle")
+            # Optionally, reset the angle if you want to run it again:
+            # self.circle_angle = 0.0
+            return
+
+        # Calculate the current setpoint on the circle
+        setpoint_x = center_x + radius * math.cos(self.circle_angle)
+        setpoint_y = center_y + radius * math.sin(self.circle_angle)
+        setpoint_z = -altitude  # NED frame: altitude is negative
+
+        msg = TrajectorySetpoint()
+        msg.position = [float(setpoint_x), float(setpoint_y), float(setpoint_z)]
+
+        # Optional: set a tangential velocity for smoother motion
+        tangential_vel = 20.0  # Adjust as needed
+        msg.velocity = [
+            -tangential_vel * math.sin(self.circle_angle),  # vx
+            tangential_vel * math.cos(self.circle_angle),  # vy
+            0.0                                           # vz
+        ]
+        msg.timestamp = int(self.get_clock().now().nanoseconds / 1000)
+        self.trajectory_setpoint_publisher.publish(msg)
+
+        # Update the angle for the next setpoint
+        self.circle_angle += 0.1  # Adjust step size as needed
+
 
     def publish_waypoint_setpoint(self, x, y, altitude):
         """Publish a single waypoint setpoint"""
