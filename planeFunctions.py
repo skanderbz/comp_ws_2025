@@ -304,7 +304,7 @@ class FixedWingControl(Node):
 
         self.spiral_index = 0
 
-# Monica extension Land
+# Monica extension Land ( Does not work as intended)
     def land(self):
         """Switch to land mode."""
         self.publish_vehicle_command(VehicleCommand.VEHICLE_CMD_NAV_LAND,
